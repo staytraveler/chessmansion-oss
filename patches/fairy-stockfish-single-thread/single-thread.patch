@@ -1,0 +1,74 @@
+diff --git a/src/thread.cpp b/src/thread.cpp
+index 32aaf58..0b5cd76 100644
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -36,10 +36,17 @@ ThreadPool Threads; // Global object
+ /// Thread constructor launches the thread and waits until it goes to sleep
+ /// in idle_loop(). Note that 'searching' and 'exit' should be already set.
+ 
++#ifdef SINGLE_THREADED
++// 싱글스레드 빌드: 별도 OS 스레드 없이 호출한 쪽(메인 루프)에서 바로 탐색함
++Thread::Thread(size_t n) : idx(n) {
++  searching = false;
++}
++#else
+ Thread::Thread(size_t n) : idx(n), stdThread(&Thread::idle_loop, this) {
+ 
+   wait_for_search_finished();
+ }
++#endif
+ 
+ 
+ /// Thread destructor wakes up the thread in idle_loop() and waits
+@@ -49,9 +56,11 @@ Thread::~Thread() {
+ 
+   assert(!searching);
+ 
++#ifndef SINGLE_THREADED
+   exit = true;
+   start_searching();
+   stdThread.join();
++#endif
+ }
+ 
+ 
+@@ -80,9 +89,15 @@ void Thread::clear() {
+ 
+ void Thread::start_searching() {
+ 
++#ifdef SINGLE_THREADED
++  searching = true;
++  search();
++  searching = false;
++#else
+   std::lock_guard<std::mutex> lk(mutex);
+   searching = true;
+   cv.notify_one(); // Wake up the thread in idle_loop()
++#endif
+ }
+ 
+ 
+@@ -91,6 +106,9 @@ void Thread::start_searching() {
+ 
+ void Thread::wait_for_search_finished() {
+ 
++#ifdef SINGLE_THREADED
++  return; // 탐색이 항상 동기로 끝난 뒤에만 여기 옴
++#endif
+   std::unique_lock<std::mutex> lk(mutex);
+   cv.wait(lk, [&]{ return !searching; });
+ }
+diff --git a/src/thread.h b/src/thread.h
+index 464be79..b56365c 100644
+--- a/src/thread.h
++++ b/src/thread.h
+@@ -45,7 +45,9 @@ class Thread {
+   std::condition_variable cv;
+   size_t idx;
+   bool exit = false, searching = true; // Set before starting std::thread
++#ifndef SINGLE_THREADED
+   NativeThread stdThread;
++#endif
+ 
+ public:
+   explicit Thread(size_t);

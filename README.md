@@ -11,7 +11,7 @@ This repository publishes the open-source chess engines used by the ChessMansion
 | 엔진 | 앱에서의 용도 | 배포 버전 | 소스 (정확한 빌드 커밋) |
 |---|---|---|---|
 | **Stockfish** (stockfish.js, `stockfish-19-lite-single`) | 클래식 체스·안개 체스·체스의 신 AI | npm [`stockfish`](https://www.npmjs.com/package/stockfish) **19.0.0** | [nmrugg/stockfish.js @ `54fde71`](https://github.com/nmrugg/stockfish.js/tree/54fde71d90c7c403964f6cacef48f7bbec495df1) |
-| **Fairy-Stockfish** (WebAssembly 빌드) | 5×5 체스 AI (`gardner` 변형) | npm [`fairy-stockfish-nnue.wasm`](https://www.npmjs.com/package/fairy-stockfish-nnue.wasm) **1.1.12** | [fairy-stockfish/fairy-stockfish.wasm @ `b2e693e`](https://github.com/fairy-stockfish/fairy-stockfish.wasm/tree/b2e693ef1e111233ce3fb40685921708b3276ed6) |
+| **Fairy-Stockfish** (WebAssembly **싱글스레드** 빌드, 체스맨션 수정본) | 5×5 체스 AI (`gardner` 변형) | 직접 빌드 (Emscripten 2.0.26) | [fairy-stockfish/fairy-stockfish.wasm @ `4d4b393`](https://github.com/fairy-stockfish/fairy-stockfish.wasm/tree/4d4b39395955df4695f28887800f0836f9c4d37d) + [patches/fairy-stockfish-single-thread](./patches/fairy-stockfish-single-thread) |
 
 원본 프로젝트 / Upstream projects:
 - Stockfish — https://github.com/official-stockfish/Stockfish
@@ -21,14 +21,15 @@ This repository publishes the open-source chess engines used by the ChessMansion
 
 ```
 engines/stockfish/         앱이 실제로 배포하는 Stockfish 파일 (npm stockfish 19.0.0 그대로, 수정 없음)
-engines/fairy-stockfish/   앱이 실제로 배포하는 Fairy-Stockfish 파일 (npm fairy-stockfish-nnue.wasm 1.1.12 그대로, 수정 없음)
+engines/fairy-stockfish/   앱이 실제로 배포하는 Fairy-Stockfish 파일 (싱글스레드로 직접 빌드한 수정본 — 아래 참고)
+patches/                   Fairy-Stockfish 수정 내용(소스 패치)과 빌드 스크립트
 source/                    위 파일들을 빌드한 커밋의 전체 소스 코드 압축본 (C++ 소스 + 빌드 스크립트)
 SHA256SUMS.txt             위 파일들의 체크섬
 LICENSE                    GNU General Public License v3 전문
 ```
 
-엔진 파일은 **수정하지 않은 원본 빌드 그대로** 배포합니다. 소스 압축본은 각 npm 패키지의 `gitHead`(빌드에 쓰인 커밋)에서 받은 것으로, 원본 저장소가 사라지더라도 대응 소스를 받을 수 있도록 함께 보관합니다.
-The engine files are distributed unmodified. The source archives were taken from the exact commits (`gitHead`) the npm packages were built from, and are mirrored here so the corresponding source remains available.
+Stockfish는 **수정하지 않은 원본 빌드 그대로** 배포합니다. Fairy-Stockfish는 아이폰(WebKit) 등 SharedArrayBuffer를 쓸 수 없는 브라우저에서도 돌도록 **스레드 없이 동작하게 수정해서 직접 빌드**했습니다(아래 "Fairy-Stockfish 수정 사항"). 소스 압축본은 각 npm 패키지의 `gitHead`(빌드에 쓰인 커밋)에서 받은 것으로, 원본 저장소가 사라지더라도 대응 소스를 받을 수 있도록 함께 보관합니다.
+Stockfish is distributed unmodified. Fairy-Stockfish is a modified single-threaded build (see "Fairy-Stockfish modifications" below). The source archives were taken from the exact commits (`gitHead`) the npm packages were built from, and are mirrored here so the corresponding source remains available.
 
 ## 앱에서 엔진을 쓰는 방식 / How the app uses the engines
 
@@ -36,6 +37,21 @@ The engine files are distributed unmodified. The source archives were taken from
   The engines run as separate programs (a Web Worker / the engine's own WebAssembly threads) and communicate with the app only through the standard UCI text protocol. The engine code is not linked into the app code.
 - 난이도는 엔진 옵션이 아니라 탐색 깊이(`go depth`)와 시간 제한(`movetime`)으로만 조절합니다.
 - Fairy-Stockfish는 `setoption name UCI_Variant value gardner`로 5×5 변형을 사용합니다.
+
+## Fairy-Stockfish 수정 사항 / Fairy-Stockfish modifications
+
+2026-10-02 — 기반 소스: `fairy-stockfish/fairy-stockfish.wasm` 커밋 `4d4b39395955df4695f28887800f0836f9c4d37d` (소스 압축본: `source/fairy-stockfish.wasm-4d4b39395955df4695f28887800f0836f9c4d37d.tar.gz`)
+
+`patches/fairy-stockfish-single-thread/`:
+
+- `single-thread.patch` — `src/thread.cpp`, `src/thread.h`: `SINGLE_THREADED` 매크로가 정의되면 탐색 스레드를 따로 만들지 않고 호출한 쪽에서 바로 탐색함(멀티스레드·SharedArrayBuffer 불필요).
+- `preamble-single.js` — 원본 `src/emscripten/preamble.js`에서 pthread 의존을 뺀 UCI 명령 큐/출력 연결.
+- `worker-single.js` — 빌드 결과를 `new Worker('stockfish.js')`로 바로 띄울 수 있게 하는 진입 코드.
+- `build-single.sh` — 실제 빌드 명령(Emscripten 2.0.26, `-DSINGLE_THREADED`, largeboards·allvars·NNUE 내장·wasm SIMD 끔).
+
+빌드 재현: 위 커밋을 받아 `git apply single-thread.patch` → `preamble-single.js`, `worker-single.js`를 `src/emscripten/`에 복사 → `build-single.sh` 실행.
+
+The Fairy-Stockfish build shipped with the app is modified to run without threads (no SharedArrayBuffer), so it also works in WebKit browsers such as iOS Safari. To reproduce it: check out the commit above, `git apply single-thread.patch`, copy `preamble-single.js` and `worker-single.js` into `src/emscripten/`, and run `build-single.sh`.
 
 ## 소스에서 직접 빌드하기 / Building from source
 
