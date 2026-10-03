@@ -11,7 +11,7 @@ This repository publishes the open-source chess engines used by the ChessMansion
 | 엔진 | 앱에서의 용도 | 배포 버전 | 소스 (정확한 빌드 커밋) |
 |---|---|---|---|
 | **Stockfish** (stockfish.js, `stockfish-19-lite-single`) | 클래식 체스·안개 체스·체스의 신 AI | npm [`stockfish`](https://www.npmjs.com/package/stockfish) **19.0.0** | [nmrugg/stockfish.js @ `54fde71`](https://github.com/nmrugg/stockfish.js/tree/54fde71d90c7c403964f6cacef48f7bbec495df1) |
-| **Fairy-Stockfish** (WebAssembly **싱글스레드** 빌드, 체스맨션 수정본) | 5×5 체스 AI (`gardner` 변형) | 직접 빌드 (Emscripten 2.0.26) | [fairy-stockfish/fairy-stockfish.wasm @ `4d4b393`](https://github.com/fairy-stockfish/fairy-stockfish.wasm/tree/4d4b39395955df4695f28887800f0836f9c4d37d) + [patches/fairy-stockfish-single-thread](./patches/fairy-stockfish-single-thread) |
+| **Fairy-Stockfish** (WebAssembly **싱글스레드** 빌드, 체스맨션 수정본) | 체스맨션 AI·기보 분석 (`chessmansion` 변형, 직접 추가), 5×5 체스 AI (`gardner` 변형) | 직접 빌드 (Emscripten 2.0.26) | [fairy-stockfish/fairy-stockfish.wasm @ `4d4b393`](https://github.com/fairy-stockfish/fairy-stockfish.wasm/tree/4d4b39395955df4695f28887800f0836f9c4d37d) + [patches/fairy-stockfish-single-thread](./patches/fairy-stockfish-single-thread) + [patches/fairy-stockfish-chessmansion](./patches/fairy-stockfish-chessmansion) |
 
 원본 프로젝트 / Upstream projects:
 - Stockfish — https://github.com/official-stockfish/Stockfish
@@ -35,8 +35,8 @@ Stockfish is distributed unmodified. Fairy-Stockfish is a modified single-thread
 
 - 엔진은 브라우저 안에서 **별도의 Web Worker(또는 엔진 자체의 WebAssembly 스레드)**로 실행되고, 앱은 표준 **UCI 텍스트 명령**(`position`, `go depth N movetime M`, `bestmove` 등)으로만 엔진과 주고받습니다. 엔진 코드와 앱 코드는 서로 링크되지 않은 별개의 프로그램입니다.
   The engines run as separate programs (a Web Worker / the engine's own WebAssembly threads) and communicate with the app only through the standard UCI text protocol. The engine code is not linked into the app code.
-- 난이도는 엔진 옵션이 아니라 탐색 깊이(`go depth`)와 시간 제한(`movetime`)으로만 조절합니다.
-- Fairy-Stockfish는 `setoption name UCI_Variant value gardner`로 5×5 변형을 사용합니다.
+- 난이도는 탐색 깊이(`go depth`)·시간 제한(`movetime`)과, 체스맨션 AI에서는 엔진의 표준 옵션 `Skill Level`로 조절합니다.
+- Fairy-Stockfish는 `setoption name UCI_Variant value chessmansion`(체스맨션) / `gardner`(5×5)로 변형을 고릅니다.
 
 ## Fairy-Stockfish 수정 사항 / Fairy-Stockfish modifications
 
@@ -49,9 +49,14 @@ Stockfish is distributed unmodified. Fairy-Stockfish is a modified single-thread
 - `worker-single.js` — 빌드 결과를 `new Worker('stockfish.js')`로 바로 띄울 수 있게 하는 진입 코드.
 - `build-single.sh` — 실제 빌드 명령(Emscripten 2.0.26, `-DSINGLE_THREADED`, largeboards·allvars·NNUE 내장·wasm SIMD 끔).
 
-빌드 재현: 위 커밋을 받아 `git apply single-thread.patch` → `preamble-single.js`, `worker-single.js`를 `src/emscripten/`에 복사 → `build-single.sh` 실행.
+`patches/fairy-stockfish-chessmansion/` (2026-10-02, 마지막 수정 2026-10-03):
 
-The Fairy-Stockfish build shipped with the app is modified to run without threads (no SharedArrayBuffer), so it also works in WebKit browsers such as iOS Safari. To reproduce it: check out the commit above, `git apply single-thread.patch`, copy `preamble-single.js` and `worker-single.js` into `src/emscripten/`, and run `build-single.sh`.
+- `chessmansion.patch` — 현재 배포 빌드에 들어간 체스맨션 변형 수정 전체(스레드 관련 파일 제외, `git diff` 결과). `src/variant.cpp/.h`(6×6 `chessmansion` 변형, 맨션 기물 `m` = Betza "AD", 캐슬링은 맨션 쪽·룩 쪽 둘 다, 무진전 무승부 20수), `src/position.cpp/.h`(생산 포인트 상태·해시·FEN 끝 "백포인트 흑포인트", 맨션 옆 칸에만 놓는 생산 착수, 맨션이 잡히면 포인트 0), `src/evaluate.cpp`(포인트 가치), `src/ucioption.cpp`(`MansionValue`, `MansionPointValue` 옵션).
+- `patch-mansion.cjs`, `patch-mansion-points.cjs` — 위 수정을 원본 소스에 적용하는 스크립트(이 순서로 실행). 결과는 `chessmansion.patch`와 같음.
+
+빌드 재현: 위 커밋을 받아 `git apply single-thread.patch` → `preamble-single.js`, `worker-single.js`를 `src/emscripten/`에 복사 → `git apply chessmansion.patch`(또는 `node patch-mansion.cjs && node patch-mansion-points.cjs`) → `build-single.sh` 실행.
+
+The Fairy-Stockfish build shipped with the app is modified to run without threads (no SharedArrayBuffer), so it also works in WebKit browsers such as iOS Safari. To reproduce it: check out the commit above, `git apply single-thread.patch`, copy `preamble-single.js` and `worker-single.js` into `src/emscripten/`, then apply `chessmansion.patch` (adds the `chessmansion` variant), and run `build-single.sh`.
 
 ## 소스에서 직접 빌드하기 / Building from source
 

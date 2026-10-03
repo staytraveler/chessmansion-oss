@@ -1,0 +1,285 @@
+diff --git a/src/evaluate.cpp b/src/evaluate.cpp
+index dca3a34..008774d 100644
+--- a/src/evaluate.cpp
++++ b/src/evaluate.cpp
+@@ -1658,6 +1658,13 @@ Value Eval::evaluate(const Position& pos) {
+                     : adjusted_NNUE();                   // NNUE
+   }
+ 
++  // 체스맨션: 보유 포인트 차이(둘 차례 기준)
++  if (pos.production_piece() != NO_PIECE_TYPE)
++  {
++      Color us = pos.side_to_move();
++      v += (pos.production_points(us) - pos.production_points(~us)) * pos.variant()->productionPointValue;
++  }
++
+   // Damp down the evaluation linearly when shuffling
+   if (pos.n_move_rule())
+   {
+diff --git a/src/position.cpp b/src/position.cpp
+index 2b5ae3a..de6dc22 100644
+--- a/src/position.cpp
++++ b/src/position.cpp
+@@ -46,6 +46,7 @@ namespace Zobrist {
+   Key checks[COLOR_NB][CHECKS_NB];
+   Key wall[SQUARE_NB];
+   Key endgame[EG_EVAL_NB];
++  Key production[COLOR_NB][64];
+ }
+ 
+ 
+@@ -172,6 +173,9 @@ void Position::init() {
+ 
+   Zobrist::side = rng.rand<Key>();
+   Zobrist::noPawns = rng.rand<Key>();
++  for (Color c : {WHITE, BLACK})
++      for (int n = 0; n < 64; ++n)
++          Zobrist::production[c][n] = rng.rand<Key>();
+ 
+   for (Color c : {WHITE, BLACK})
+       for (int n = 0; n < CHECKS_NB; ++n)
+@@ -519,6 +523,17 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
+       // Convert from fullmove starting from 1 to gamePly starting from 0,
+       // handle also common incorrect FEN with fullmove = 0.
+       gamePly = std::max(2 * (gamePly - 1), 0) + (sideToMove == BLACK);
++
++      // 체스맨션 생산 포인트
++      if (production_piece() != NO_PIECE_TYPE)
++      {
++          int pw = 0, pb = 0;
++          if (ss >> pw >> pb)
++          {
++              st->productionPoints[WHITE] = std::max(pw, 0);
++              st->productionPoints[BLACK] = std::max(pb, 0);
++          }
++      }
+   }
+ 
+   // counting rules
+@@ -668,6 +683,10 @@ void Position::set_state(StateInfo* si) const {
+   if (check_counting())
+       for (Color c : {WHITE, BLACK})
+           si->key ^= Zobrist::checks[c][si->checksRemaining[c]];
++
++  if (production_piece() != NO_PIECE_TYPE)
++      for (Color c : {WHITE, BLACK})
++          si->key ^= Zobrist::production[c][std::min(si->productionPoints[c], 63)];
+ }
+ 
+ 
+@@ -835,6 +854,9 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
+ 
+   ss << " " << 1 + (gamePly - (sideToMove == BLACK)) / 2;
+ 
++  if (production_piece() != NO_PIECE_TYPE)
++      ss << " " << st->productionPoints[WHITE] << " " << st->productionPoints[BLACK];
++
+   return ss.str();
+ }
+ 
+@@ -1675,7 +1697,22 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
+   }
+ 
+   // Update hash key
+-  if (type_of(m) == DROP)
++  if (production_piece() != NO_PIECE_TYPE)
++  {
++      // 체스맨션: 생산하면 비용만큼 차감, 그 밖의 모든 수(캐슬링 포함)는 +1
++      int before = st->productionPoints[us];
++      if (type_of(m) == DROP)
++          st->productionPoints[us] -= production_cost(in_hand_piece_type(m));
++      else if (pieces(us, production_piece()))
++          st->productionPoints[us] = std::min(st->productionPoints[us] + 1, var->productionPointCap);
++      k ^=  Zobrist::production[us][std::min(before, 63)]
++          ^ Zobrist::production[us][std::min(st->productionPoints[us], 63)];
++  }
++
++  if (type_of(m) == DROP && production_piece() != NO_PIECE_TYPE)
++      // 생산은 손에 든 기물이 없고, 무진전 카운터도 리셋하지 않음
++      k ^= Zobrist::psq[pc][to];
++  else if (type_of(m) == DROP)
+   {
+       Piece pc_hand = make_piece(us, in_hand_piece_type(m));
+       k ^=  Zobrist::psq[pc][to]
+@@ -2089,6 +2126,15 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
+       k ^= Zobrist::wall[gating_square(m)];
+   }
+ 
++  // 체스맨션: 맨션을 잃은 쪽 포인트는 0
++  if (   production_piece() != NO_PIECE_TYPE && captured && color_of(captured) == them
++      && type_of(captured) == production_piece() && st->productionPoints[them])
++  {
++      k ^=  Zobrist::production[them][std::min(st->productionPoints[them], 63)]
++          ^ Zobrist::production[them][0];
++      st->productionPoints[them] = 0;
++  }
++
+   // Update the key with the final value
+   st->key = k;
+   // Calculate checkers bitboard (if move gives check)
+diff --git a/src/position.h b/src/position.h
+index 685c079..d0edf86 100644
+--- a/src/position.h
++++ b/src/position.h
+@@ -56,6 +56,7 @@ struct StateInfo {
+   Square castlingKingSquare[COLOR_NB];
+   Bitboard wallSquares;
+   Bitboard gatesBB[COLOR_NB];
++  int    productionPoints[COLOR_NB];
+ 
+   // Not copied when making a move (will be recomputed anyhow)
+   Key        key;
+@@ -170,6 +171,10 @@ public:
+   bool has_capture() const;
+   bool must_drop() const;
+   bool piece_drops() const;
++  PieceType production_piece() const;
++  int production_points(Color c) const;
++  int production_cost(PieceType pt) const;
++  Bitboard production_squares(Color c) const;
+   bool drop_loop() const;
+   bool captures_to_hand() const;
+   bool first_rank_pawn_drops() const;
+@@ -675,6 +680,27 @@ inline bool Position::must_drop() const {
+   return var->mustDrop;
+ }
+ 
++inline PieceType Position::production_piece() const {
++  return var->productionPiece;
++}
++
++inline int Position::production_points(Color c) const {
++  return st->productionPoints[c];
++}
++
++inline int Position::production_cost(PieceType pt) const {
++  return var->productionCost[pt];
++}
++
++// 생산할 수 있는 칸 = 자기 맨션 8방향 바로 옆(빈칸 여부는 호출하는 쪽에서 거름)
++inline Bitboard Position::production_squares(Color c) const {
++  Bitboard adj = 0;
++  Bitboard m = pieces(c, var->productionPiece);
++  while (m)
++      adj |= PseudoAttacks[WHITE][KING][pop_lsb(m)];
++  return adj;
++}
++
+ inline bool Position::piece_drops() const {
+   assert(var != nullptr);
+   return var->pieceDrops;
+@@ -708,6 +734,15 @@ inline Bitboard Position::drop_region(Color c) const {
+ inline Bitboard Position::drop_region(Color c, PieceType pt) const {
+   Bitboard b = drop_region(c) & board_bb(c, pt);
+ 
++  // 체스맨션 생산: 포인트가 모자라거나, 생산 못 하는 종류거나, 체크 중이면 놓을 칸이 없음
++  if (var->productionPiece != NO_PIECE_TYPE)
++  {
++      int cost = var->productionCost[pt];
++      if (!cost || cost > st->productionPoints[c] || (c == sideToMove && st->checkersBB))
++          return Bitboard(0);
++      b &= production_squares(c);
++  }
++
+   // Pawns on back ranks
+   if (pt == PAWN)
+   {
+diff --git a/src/ucioption.cpp b/src/ucioption.cpp
+index 0326e04..a9b4068 100644
+--- a/src/ucioption.cpp
++++ b/src/ucioption.cpp
+@@ -76,6 +76,17 @@ void on_variant_path(const Option& o) {
+ 
+     Options["UCI_Variant"].set_combo(variants.get_keys());
+ }
++// 체스맨션: 맨션 기물 가치(MansionValue)·포인트 1점 가치(MansionPointValue) 조정
++void on_mansion_value(const Option&) {
++    auto it = variants.find("chessmansion");
++    if (it == variants.end())
++        return;
++    Variant* v = const_cast<Variant*>(it->second);
++    v->pieceValue[MG][CUSTOM_PIECE_1] = v->pieceValue[EG][CUSTOM_PIECE_1] = int(Options["MansionValue"]);
++    v->productionPointValue = int(Options["MansionPointValue"]);
++    if (std::string(Options["UCI_Variant"]) == "chessmansion")
++        PSQT::init(v);
++}
+ void on_variant_set(const Option &o) {
+     // Re-initialize NNUE
+     Eval::NNUE::init();
+@@ -192,6 +203,8 @@ void init(OptionsMap& o) {
+   o["nodestime"]             << Option(0, 0, 10000);
+   o["UCI_Chess960"]          << Option(false);
+   o["UCI_Variant"]           << Option("chess", variants.get_keys(), on_variant_change);
++  o["MansionValue"]          << Option(2600, 0, 10000, on_mansion_value);
++  o["MansionPointValue"]     << Option(60, 0, 2000, on_mansion_value);
+   o["UCI_AnalyseMode"]       << Option(false);
+   o["UCI_LimitStrength"]     << Option(false);
+   o["UCI_Elo"]               << Option(1350, 500, 2850);
+diff --git a/src/variant.cpp b/src/variant.cpp
+index 9ec8c49..0c4a278 100644
+--- a/src/variant.cpp
++++ b/src/variant.cpp
+@@ -1026,6 +1026,39 @@ namespace {
+         v->castling = false;
+         return v;
+     }
++    // ChessMansion (체스맨션) — chessmansion.com
++    Variant* chessmansion_variant() {
++        Variant* v = chess_variant_base()->init();
++        v->maxRank = RANK_6;
++        v->maxFile = FILE_F;
++        v->add_piece(CUSTOM_PIECE_1, 'm', "AD");
++        v->pieceValue[MG][CUSTOM_PIECE_1] = 2600;
++        v->pieceValue[EG][CUSTOM_PIECE_1] = 2600;
++        v->startFen = "mqkbnr/pppppp/6/6/PPPPPP/MQKBNR w KQkq - 0 1 0 0";
++        v->promotionRegion[WHITE] = Rank6BB;
++        v->promotionRegion[BLACK] = Rank1BB;
++        v->doubleStepRegion[WHITE] = Rank2BB;
++        v->doubleStepRegion[BLACK] = Rank5BB;
++        v->castlingKingFile = FILE_C;
++        v->castlingKingsideFile = FILE_E;
++        v->castlingQueensideFile = FILE_A;
++        v->castlingRookKingsideFile = FILE_F;
++        v->castlingRookQueensideFile = FILE_A;
++        v->castlingRookPieces[WHITE] = v->castlingRookPieces[BLACK] = piece_set(ROOK) | CUSTOM_PIECE_1;
++        v->pieceDrops = true;
++        v->freeDrops = true;
++        v->firstRankPawnDrops = true;
++        v->promotionZonePawnDrops = false;
++        v->productionPiece = CUSTOM_PIECE_1;
++        v->productionCost[PAWN] = 1;
++        v->productionCost[KNIGHT] = 3;
++        v->productionCost[BISHOP] = 3;
++        v->productionCost[ROOK] = 5;
++        v->productionCost[QUEEN] = 9;
++        v->productionPointValue = 60;
++        v->nMoveRule = 20;
++        return v;
++    }
+     // Almost chess
+     // Queens are replaced by chancellors
+     // https://en.wikipedia.org/wiki/Almost_chess
+@@ -1921,6 +1954,7 @@ void VariantMap::init() {
+     add("euroshogi", euroshogi_variant());
+     add("losalamos", losalamos_variant());
+     add("gardner", gardner_variant());
++    add("chessmansion", chessmansion_variant());
+     add("almost", almost_variant());
+     add("sortofalmost", sortofalmost_variant());
+     add("chigorin", chigorin_variant());
+diff --git a/src/variant.h b/src/variant.h
+index 0e6d44c..6b5ace1 100644
+--- a/src/variant.h
++++ b/src/variant.h
+@@ -118,6 +118,11 @@ struct Variant {
+   Rank soldierPromotionRank = RANK_1;
+   EnclosingRule flipEnclosedPieces = NO_ENCLOSING;
+   bool freeDrops = false;
++  // 체스맨션 생산: productionPiece 옆 칸에만, productionCost만큼 포인트를 써서 놓을 수 있음(0 = 생산 불가 종류)
++  PieceType productionPiece = NO_PIECE_TYPE;
++  int productionCost[PIECE_TYPE_NB] = {};
++  int productionPointValue = 0;
++  int productionPointCap = 1000;
+ 
+   // game end
+   PieceSet nMoveRuleTypes[COLOR_NB] = {piece_set(PAWN), piece_set(PAWN)};
