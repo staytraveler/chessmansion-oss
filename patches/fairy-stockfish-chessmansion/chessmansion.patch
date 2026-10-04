@@ -1,8 +1,8 @@
 diff --git a/src/evaluate.cpp b/src/evaluate.cpp
-index dca3a34..008774d 100644
+index dca3a34..468afb4 100644
 --- a/src/evaluate.cpp
 +++ b/src/evaluate.cpp
-@@ -1658,6 +1658,13 @@ Value Eval::evaluate(const Position& pos) {
+@@ -1658,6 +1658,34 @@ Value Eval::evaluate(const Position& pos) {
                      : adjusted_NNUE();                   // NNUE
    }
  
@@ -11,34 +11,123 @@ index dca3a34..008774d 100644
 +  {
 +      Color us = pos.side_to_move();
 +      v += (pos.production_points(us) - pos.production_points(~us)) * pos.variant()->productionPointValue;
++      // 킹이 들어가 있는 맨션은 판에서 빠진 것처럼 저장되지만 맨션은 그대로이므로 맨션 가치를 다시 더함
++      // (안 그러면 킹 귀환을 "맨션 하나를 잃는 수"로 잘못 평가함)
++      v += (int(pos.mansion_merged(us)) - int(pos.mansion_merged(~us))) * (pos.variant()->pieceValue[MG][pos.production_piece()] + pos.variant()->mansionKingBonus);
++      // 체스맨션 전용 평가 항목 — 출격 빈칸·마지막 맨션·킹의 피신 거리·영향력 문턱
++      const Variant* mv = pos.variant();
++      auto mansionTerms = [&](Color c) {
++          int s = 0;
++          bool merged = pos.mansion_merged(c);
++          Bitboard mansions = pos.pieces(c, pos.production_piece());
++          if (!mansions && !merged)
++              return 0;
++          s += mv->mansionAliveBonus;
++          s += popcount(pos.production_squares(c) & ~pos.pieces()) * mv->mansionSquareValue;
++          if (!merged && pos.count<KING>(c) && (PseudoAttacks[WHITE][KING][pos.square<KING>(c)] & mansions))
++              s += mv->mansionShelterBonus;
++          int p = pos.production_points(c);
++          if (p >= 3) s += mv->mansionReady3;
++          if (p >= 9) s += mv->mansionReady9;
++          return s;
++      };
++      v += mansionTerms(us) - mansionTerms(~us);
 +  }
 +
    // Damp down the evaluation linearly when shuffling
    if (pos.n_move_rule())
    {
+diff --git a/src/movegen.cpp b/src/movegen.cpp
+index a7b6a9f..ef7355f 100644
+--- a/src/movegen.cpp
++++ b/src/movegen.cpp
+@@ -372,6 +372,49 @@ namespace {
+   }
+ 
+ 
++  // 체스맨션: 기물 귀환(체크 중 제외 — 킹·맨션 외 기물이 자기 움직임으로 내 맨션 칸에 닿음, 폰은 앞 1칸·첫 수 2칸만),
++  // 킹 귀환(바로 옆 내 맨션으로), 맨션 옮기기(들어가 있는 킹 → 다른 내 맨션). 킹 귀환·옮기기는 체크 중에도 생성.
++  // 합법성(핀·공격받는 칸)은 legal()에서 거름
++  template<Color Us>
++  ExtMove* generate_mansion_specials(const Position& pos, ExtMove* moveList, bool pieceReturns) {
++    bool merged = pos.mansion_merged(Us);
++    Bitboard mansions = pos.pieces(Us, pos.production_piece());
++    if (pieceReturns)
++    {
++        Bitboard targets = mansions;
++        if (merged && pos.count<KING>(Us))
++            targets |= pos.square<KING>(Us);
++        Bitboard movers = pos.pieces(Us) & ~pos.pieces(Us, KING) & ~mansions;
++        constexpr Direction Up = pawn_push(Us);
++        while (targets)
++        {
++            Square t = pop_lsb(targets);
++            for (Bitboard b = movers; b; )
++            {
++                Square from = pop_lsb(b);
++                PieceType pt = type_of(pos.piece_on(from));
++                bool reach;
++                if (pt == PAWN)
++                    reach =   from + Up == t
++                           || ((pos.double_step_region(Us) & from) && is_ok(from + Up) && pos.empty(from + Up) && from + Up + Up == t);
++                else
++                    reach = pos.attacks_from(Us, pt, from) & t;
++                if (reach)
++                    *moveList++ = make<SPECIAL>(from, t);
++            }
++        }
++    }
++    if (pos.count<KING>(Us))
++    {
++        Square ksq = pos.square<KING>(Us);
++        // 밖에 있으면 바로 옆 맨션으로, 들어가 있으면 다른 맨션 어디로든
++        Bitboard b = merged ? mansions : (mansions & PseudoAttacks[WHITE][KING][ksq]);
++        while (b)
++            *moveList++ = make<SPECIAL>(ksq, pop_lsb(b));
++    }
++    return moveList;
++  }
++
+   template<Color Us, GenType Type>
+   ExtMove* generate_all(const Position& pos, ExtMove* moveList) {
+ 
+@@ -470,6 +513,10 @@ namespace {
+                     moveList = make_move_and_gating<CASTLING>(pos, moveList, Us,ksq, pos.castling_rook_square(cr));
+     }
+ 
++    // 체스맨션: 귀환(체크 중엔 킹 귀환·옮기기만)
++    if (pos.production_piece() != NO_PIECE_TYPE && (Type == QUIETS || Type == NON_EVASIONS || Type == EVASIONS))
++        moveList = generate_mansion_specials<Us>(pos, moveList, Type != EVASIONS);
++
+     return moveList;
+   }
+ 
 diff --git a/src/position.cpp b/src/position.cpp
-index 2b5ae3a..de6dc22 100644
+index 2b5ae3a..7db94e7 100644
 --- a/src/position.cpp
 +++ b/src/position.cpp
-@@ -46,6 +46,7 @@ namespace Zobrist {
+@@ -46,6 +46,8 @@ namespace Zobrist {
    Key checks[COLOR_NB][CHECKS_NB];
    Key wall[SQUARE_NB];
    Key endgame[EG_EVAL_NB];
 +  Key production[COLOR_NB][64];
++  Key mansionMerged[COLOR_NB];
  }
  
  
-@@ -172,6 +173,9 @@ void Position::init() {
+@@ -172,6 +174,11 @@ void Position::init() {
  
    Zobrist::side = rng.rand<Key>();
    Zobrist::noPawns = rng.rand<Key>();
 +  for (Color c : {WHITE, BLACK})
 +      for (int n = 0; n < 64; ++n)
 +          Zobrist::production[c][n] = rng.rand<Key>();
++  for (Color c : {WHITE, BLACK})
++      Zobrist::mansionMerged[c] = rng.rand<Key>();
  
    for (Color c : {WHITE, BLACK})
        for (int n = 0; n < CHECKS_NB; ++n)
-@@ -519,6 +523,17 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
+@@ -519,6 +526,23 @@ Position& Position::set(const Variant* v, const string& fenStr, bool isChess960,
        // Convert from fullmove starting from 1 to gamePly starting from 0,
        // handle also common incorrect FEN with fullmove = 0.
        gamePly = std::max(2 * (gamePly - 1), 0) + (sideToMove == BLACK);
@@ -51,33 +140,195 @@ index 2b5ae3a..de6dc22 100644
 +          {
 +              st->productionPoints[WHITE] = std::max(pw, 0);
 +              st->productionPoints[BLACK] = std::max(pb, 0);
++              int mw = 0, mb = 0;
++              if (ss >> mw >> mb)
++              {
++                  st->mansionMerged[WHITE] = mw != 0;
++                  st->mansionMerged[BLACK] = mb != 0;
++              }
 +          }
 +      }
    }
  
    // counting rules
-@@ -668,6 +683,10 @@ void Position::set_state(StateInfo* si) const {
+@@ -587,7 +611,7 @@ void Position::set_check_info(StateInfo* si) const {
+   for (PieceSet ps = piece_types(); ps;)
+   {
+       PieceType pt = pop_lsb(ps);
+-      PieceType movePt = pt == KING ? king_type() : pt;
++      PieceType movePt = pt == KING ? (var->mergedKingType != NO_PIECE_TYPE && si->mansionMerged[sideToMove] ? var->mergedKingType : king_type()) : pt;
+       si->checkSquares[pt] = ksq != SQ_NONE ? attacks_bb(~sideToMove, movePt, ksq, pieces()) : Bitboard(0);
+       // Collect special piece types that require slower check and evasion detection
+       if (AttackRiderTypes[movePt] & NON_SLIDING_RIDERS)
+@@ -668,6 +692,14 @@ void Position::set_state(StateInfo* si) const {
    if (check_counting())
        for (Color c : {WHITE, BLACK})
            si->key ^= Zobrist::checks[c][si->checksRemaining[c]];
 +
 +  if (production_piece() != NO_PIECE_TYPE)
 +      for (Color c : {WHITE, BLACK})
++      {
 +          si->key ^= Zobrist::production[c][std::min(si->productionPoints[c], 63)];
++          if (si->mansionMerged[c])
++              si->key ^= Zobrist::mansionMerged[c];
++      }
  }
  
  
-@@ -835,6 +854,9 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
+@@ -835,6 +867,10 @@ string Position::fen(bool sfen, bool showPromoted, int countStarted, std::string
  
    ss << " " << 1 + (gamePly - (sideToMove == BLACK)) / 2;
  
 +  if (production_piece() != NO_PIECE_TYPE)
-+      ss << " " << st->productionPoints[WHITE] << " " << st->productionPoints[BLACK];
++      ss << " " << st->productionPoints[WHITE] << " " << st->productionPoints[BLACK]
++         << " " << int(st->mansionMerged[WHITE]) << " " << int(st->mansionMerged[BLACK]);
 +
    return ss.str();
  }
  
-@@ -1675,7 +1697,22 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
+@@ -962,7 +998,7 @@ Bitboard Position::attackers_to(Square s, Bitboard occupied, Color c, Bitboard j
+       PieceType pt = pop_lsb(ps);
+       if (board_bb(c, pt) & s)
+       {
+-          PieceType move_pt = pt == KING ? king_type() : pt;
++          PieceType move_pt = pt == KING ? king_type(c) : pt;
+           // Consider asymmetrical moves (e.g., horse)
+           if (AttackRiderTypes[move_pt] & ASYMMETRICAL_RIDERS)
+           {
+@@ -1059,6 +1095,18 @@ bool Position::legal(Move m) const {
+   assert(!count<KING>(us) || piece_on(square<KING>(us)) == make_piece(us, KING));
+   assert(board_bb() & to);
+ 
++  // 체스맨션 SPECIAL 수
++  if (mansion_special(m))
++  {
++      if (type_of(moved_piece(m)) == KING)
++          // 킹 귀환(밖 → 맨션: 출발칸이 빔) / 맨션 옮기기(안 → 다른 맨션: 출발칸에 맨션이 남음). 도착 맨션 칸이 안전해야 함
++          return !(attackers_to(to, st->mansionMerged[us] ? pieces() : pieces() ^ from, ~us) & pieces(~us));
++      // 기물 귀환: 체크 중엔 불가, 핀 걸린 기물은 불가(사라지므로)
++      if (checkers())
++          return false;
++      return !count<KING>(us) || !(blockers_for_king(us) & from);
++  }
++
+   // Illegal checks
+   if ((!checking_permitted() || (sittuyin_promotion() && type_of(m) == PROMOTION) || (!drop_checks() && type_of(m) == DROP)) && gives_check(m))
+       return false;
+@@ -1281,7 +1329,8 @@ bool Position::legal(Move m) const {
+   // If the moving piece is a king, check whether the destination square is
+   // attacked by the opponent.
+   if (type_of(moved_piece(m)) == KING)
+-      return !attackers_to(to, occupied, ~us);
++      // 체스맨션: 맨션에서 출격하는 킹이면 출발칸에 맨션이 다시 남아 길을 막음
++      return !attackers_to(to, occupied | (production_piece() != NO_PIECE_TYPE && st->mansionMerged[us] ? square_bb(from) : Bitboard(0)), ~us);
+ 
+   // Return early when without king
+   if (!count<KING>(us))
+@@ -1440,6 +1489,20 @@ bool Position::gives_check(Move m) const {
+   if (!count<KING>(~sideToMove))
+       return false;
+ 
++  // 체스맨션 SPECIAL 수: 열린 체크 + (킹이 맨션에 들어가면) 들어간 킹의 출격 칸 공격
++  if (mansion_special(m))
++  {
++      Square theirKing = square<KING>(~sideToMove);
++      bool kingMove = type_of(moved_piece(m)) == KING;
++      Bitboard occ = kingMove && st->mansionMerged[sideToMove] ? pieces() : pieces() ^ from;
++      Bitboard others = pieces(sideToMove) & ~pieces(sideToMove, KING) & ~square_bb(from);
++      if (attackers_to(theirKing, occ, sideToMove) & others)
++          return true;
++      if (kingMove)
++          return PseudoAttacks[sideToMove][var->mergedKingType][to] & theirKing;
++      return st->mansionMerged[sideToMove] && (attacks_bb(sideToMove, var->mergedKingType, square<KING>(sideToMove), occ) & theirKing);
++  }
++
+   Bitboard occupied = (type_of(m) != DROP ? pieces() ^ from : pieces()) | to;
+   Bitboard janggiCannons = pieces(JANGGI_CANNON);
+   if (type_of(moved_piece(m)) == JANGGI_CANNON)
+@@ -1591,6 +1654,82 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
+   st->unpromotedCapturedPiece = captured ? unpromoted_piece_on(to) : NO_PIECE;
+   st->pass = is_pass(m);
+ 
++  // 체스맨션 SPECIAL 수: 기물 귀환 / 킹 귀환(밖 → 맨션) / 맨션 옮기기(안 → 다른 맨션)
++  if (mansion_special(m))
++  {
++      int before = st->productionPoints[us];
++      Piece mansionPc = make_piece(us, production_piece());
++      if (type_of(pc) == KING)
++      {
++          bool transfer = st->mansionMerged[us];
++          st->capturedPiece = mansionPc;
++          st->capturedpromoted = false;
++          st->unpromotedCapturedPiece = NO_PIECE;
++          // 도착 맨션을 판에서 빼고 킹을 그 칸으로
++          k ^= Zobrist::psq[mansionPc][to];
++          remove_piece(to);
++          move_piece(from, to);
++          k ^= Zobrist::psq[pc][from] ^ Zobrist::psq[pc][to];
++          if (transfer)
++          {
++              // 떠난 맨션은 그 자리에 다시 남음
++              put_piece(mansionPc, from);
++              k ^= Zobrist::psq[mansionPc][from];
++          }
++          else
++          {
++              st->nonPawnMaterial[us] -= PieceValue[MG][mansionPc];
++              st->materialKey ^= Zobrist::psq[mansionPc][pieceCount[mansionPc]];
++              st->mansionMerged[us] = true;
++              k ^= Zobrist::mansionMerged[us];
++          }
++      }
++      else
++      {
++          st->capturedPiece = pc;
++          st->capturedpromoted = is_promoted(from);
++          st->unpromotedCapturedPiece = unpromoted_piece_on(from);
++          st->productionPoints[us] += production_cost(type_of(pc));
++          if (type_of(pc) == PAWN)
++          {
++              st->pawnKey ^= Zobrist::psq[pc][from];
++              st->rule50 = 0;
++          }
++          else
++              st->nonPawnMaterial[us] -= PieceValue[MG][pc];
++          k ^= Zobrist::psq[pc][from];
++          remove_piece(from);
++          st->materialKey ^= Zobrist::psq[pc][pieceCount[pc]];
++      }
++      k ^=  Zobrist::production[us][std::min(before, 63)]
++          ^ Zobrist::production[us][std::min(st->productionPoints[us], 63)];
++
++      while (st->epSquares)
++          k ^= Zobrist::enpassant[file_of(pop_lsb(st->epSquares))];
++
++      st->key = k;
++      st->checkersBB = count<KING>(them) ? attackers_to(square<KING>(them), us) & pieces(us) : Bitboard(0);
++      sideToMove = ~sideToMove;
++      set_check_info(st);
++
++      st->repetition = 0;
++      int end = std::min(st->rule50, st->pliesFromNull);
++      if (end >= 4)
++      {
++          StateInfo* stp = st->previous->previous;
++          for (int i = 4; i <= end; i += 2)
++          {
++              stp = stp->previous->previous;
++              if (stp->key == st->key)
++              {
++                  st->repetition = stp->repetition ? -i : i;
++                  break;
++              }
++          }
++      }
++      return;
++  }
++
+   assert(color_of(pc) == us);
+   assert(captured == NO_PIECE || color_of(captured) == (type_of(m) != CASTLING ? them : us));
+   assert(type_of(captured) != KING);
+@@ -1675,7 +1814,22 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
    }
  
    // Update hash key
@@ -88,8 +339,8 @@ index 2b5ae3a..de6dc22 100644
 +      int before = st->productionPoints[us];
 +      if (type_of(m) == DROP)
 +          st->productionPoints[us] -= production_cost(in_hand_piece_type(m));
-+      else if (pieces(us, production_piece()))
-+          st->productionPoints[us] = std::min(st->productionPoints[us] + 1, var->productionPointCap);
++      else if (captured && color_of(captured) == them && has_mansion(us))
++          st->productionPoints[us] = std::min(st->productionPoints[us] + production_cost(type_of(captured)), var->productionPointCap);
 +      k ^=  Zobrist::production[us][std::min(before, 63)]
 +          ^ Zobrist::production[us][std::min(st->productionPoints[us], 63)];
 +  }
@@ -101,13 +352,31 @@ index 2b5ae3a..de6dc22 100644
    {
        Piece pc_hand = make_piece(us, in_hand_piece_type(m));
        k ^=  Zobrist::psq[pc][to]
-@@ -2089,6 +2126,15 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
+@@ -1814,6 +1968,17 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
+       }
+ 
+       move_piece(from, to);
++
++      if (production_piece() != NO_PIECE_TYPE && type_of(pc) == KING && st->mansionMerged[us])
++      {
++          Piece mansionPc = make_piece(us, production_piece());
++          put_piece(mansionPc, from);
++          k ^= Zobrist::psq[mansionPc][from];
++          st->nonPawnMaterial[us] += PieceValue[MG][mansionPc];
++          st->materialKey ^= Zobrist::psq[mansionPc][pieceCount[mansionPc] - 1];
++          st->mansionMerged[us] = false;
++          k ^= Zobrist::mansionMerged[us];
++      }
+   }
+ 
+   // If the moving piece is a pawn do some special extra work
+@@ -2089,11 +2254,20 @@ void Position::do_move(Move m, StateInfo& newSt, bool givesCheck) {
        k ^= Zobrist::wall[gating_square(m)];
    }
  
 +  // 체스맨션: 맨션을 잃은 쪽 포인트는 0
 +  if (   production_piece() != NO_PIECE_TYPE && captured && color_of(captured) == them
-+      && type_of(captured) == production_piece() && st->productionPoints[them])
++      && type_of(captured) == production_piece() && st->productionPoints[them] && !has_mansion(them))
 +  {
 +      k ^=  Zobrist::production[them][std::min(st->productionPoints[them], 63)]
 +          ^ Zobrist::production[them][0];
@@ -117,30 +386,72 @@ index 2b5ae3a..de6dc22 100644
    // Update the key with the final value
    st->key = k;
    // Calculate checkers bitboard (if move gives check)
+-  st->checkersBB = givesCheck ? attackers_to(square<KING>(them), us) & pieces(us) : Bitboard(0);
+-  assert(givesCheck == bool(st->checkersBB));
++  st->checkersBB = givesCheck || (production_piece() != NO_PIECE_TYPE && count<KING>(them))
++                   ? attackers_to(square<KING>(them), us) & pieces(us) : Bitboard(0);
+ 
+   sideToMove = ~sideToMove;
+ 
+@@ -2152,6 +2326,29 @@ void Position::undo_move(Move m) {
+   Square to = to_sq(m);
+   Piece pc = piece_on(to);
+ 
++  if (mansion_special(m))
++  {
++      if (type_of(st->capturedPiece) == production_piece())
++      {
++          // 킹 귀환·맨션 옮기기 되돌리기
++          if (st->previous->mansionMerged[us])
++              remove_piece(from);
++          move_piece(to, from);
++          put_piece(st->capturedPiece, to);
++      }
++      else
++          // 기물 귀환 되돌리기
++          put_piece(st->capturedPiece, from, st->capturedpromoted, st->unpromotedCapturedPiece);
++      st = st->previous;
++      --gamePly;
++      return;
++  }
++
++  // 킹 출격 되돌리기: 출발칸에 다시 놓였던 맨션을 먼저 치움
++  if (   production_piece() != NO_PIECE_TYPE && type_of(m) == NORMAL && type_of(pc) == KING
++      && st->previous->mansionMerged[us] && !st->mansionMerged[us])
++      remove_piece(from);
++
+   assert(type_of(m) == DROP || empty(from) || type_of(m) == CASTLING || is_gating(m)
+          || (type_of(m) == PROMOTION && sittuyin_promotion())
+          || (is_pass(m) && (pass(us) || var->wallOrMove)));
 diff --git a/src/position.h b/src/position.h
-index 685c079..d0edf86 100644
+index 685c079..10bc2f4 100644
 --- a/src/position.h
 +++ b/src/position.h
-@@ -56,6 +56,7 @@ struct StateInfo {
+@@ -56,6 +56,8 @@ struct StateInfo {
    Square castlingKingSquare[COLOR_NB];
    Bitboard wallSquares;
    Bitboard gatesBB[COLOR_NB];
 +  int    productionPoints[COLOR_NB];
++  bool   mansionMerged[COLOR_NB];
  
    // Not copied when making a move (will be recomputed anyhow)
    Key        key;
-@@ -170,6 +171,10 @@ public:
+@@ -170,6 +172,14 @@ public:
    bool has_capture() const;
    bool must_drop() const;
    bool piece_drops() const;
 +  PieceType production_piece() const;
 +  int production_points(Color c) const;
++  bool mansion_merged(Color c) const;
++  bool mansion_special(Move m) const;
++  bool has_mansion(Color c) const;
++  PieceType king_type(Color c) const;
 +  int production_cost(PieceType pt) const;
 +  Bitboard production_squares(Color c) const;
    bool drop_loop() const;
    bool captures_to_hand() const;
    bool first_rank_pawn_drops() const;
-@@ -675,6 +680,27 @@ inline bool Position::must_drop() const {
+@@ -675,6 +685,49 @@ inline bool Position::must_drop() const {
    return var->mustDrop;
  }
  
@@ -150,6 +461,26 @@ index 685c079..d0edf86 100644
 +
 +inline int Position::production_points(Color c) const {
 +  return st->productionPoints[c];
++}
++
++// 킹이 맨션에 들어가 있는지(킹 칸 = 맨션 칸)
++inline bool Position::mansion_merged(Color c) const {
++  return st->mansionMerged[c];
++}
++
++// 맨션이 하나라도 남아 있는지(킹이 들어가 있는 맨션 포함)
++inline bool Position::has_mansion(Color c) const {
++  return pieces(c, var->productionPiece) || st->mansionMerged[c];
++}
++
++// 기물 귀환·킹 귀환·맨션 옮기기(SPECIAL, 출발칸 → 내 맨션 칸)
++inline bool Position::mansion_special(Move m) const {
++  return var->productionPiece != NO_PIECE_TYPE && type_of(m) == SPECIAL && from_sq(m) != to_sq(m);
++}
++
++// 맨션에 들어가 있는 킹은 바로 옆 8칸 + 둘레 16칸으로 움직임(출격)
++inline PieceType Position::king_type(Color c) const {
++  return var->mergedKingType != NO_PIECE_TYPE && st->mansionMerged[c] ? var->mergedKingType : var->kingType;
 +}
 +
 +inline int Position::production_cost(PieceType pt) const {
@@ -162,13 +493,15 @@ index 685c079..d0edf86 100644
 +  Bitboard m = pieces(c, var->productionPiece);
 +  while (m)
 +      adj |= PseudoAttacks[WHITE][KING][pop_lsb(m)];
++  if (st->mansionMerged[c] && count<KING>(c))
++      adj |= PseudoAttacks[WHITE][KING][square<KING>(c)];
 +  return adj;
 +}
 +
  inline bool Position::piece_drops() const {
    assert(var != nullptr);
    return var->pieceDrops;
-@@ -708,6 +734,15 @@ inline Bitboard Position::drop_region(Color c) const {
+@@ -708,6 +761,15 @@ inline Bitboard Position::drop_region(Color c) const {
  inline Bitboard Position::drop_region(Color c, PieceType pt) const {
    Bitboard b = drop_region(c) & board_bb(c, pt);
  
@@ -176,7 +509,7 @@ index 685c079..d0edf86 100644
 +  if (var->productionPiece != NO_PIECE_TYPE)
 +  {
 +      int cost = var->productionCost[pt];
-+      if (!cost || cost > st->productionPoints[c] || (c == sideToMove && st->checkersBB))
++      if (!cost || cost > st->productionPoints[c])
 +          return Bitboard(0);
 +      b &= production_squares(c);
 +  }
@@ -184,11 +517,45 @@ index 685c079..d0edf86 100644
    // Pawns on back ranks
    if (pt == PAWN)
    {
+@@ -1276,7 +1338,7 @@ inline Bitboard Position::attacks_from(Color c, PieceType pt, Square s) const {
+   if (var->fastAttacks || var->fastAttacks2)
+       return attacks_bb(c, pt, s, byTypeBB[ALL_PIECES]) & board_bb();
+ 
+-  PieceType movePt = pt == KING ? king_type() : pt;
++  PieceType movePt = pt == KING ? king_type(c) : pt;
+   Bitboard b = attacks_bb(c, movePt, s, byTypeBB[ALL_PIECES]);
+   // Xiangqi soldier
+   if (pt == SOLDIER && !(promoted_soldiers(c) & s))
+@@ -1306,7 +1368,7 @@ inline Bitboard Position::moves_from(Color c, PieceType pt, Square s) const {
+   if (var->fastAttacks || var->fastAttacks2)
+       return moves_bb(c, pt, s, byTypeBB[ALL_PIECES]) & board_bb();
+ 
+-  PieceType movePt = pt == KING ? king_type() : pt;
++  PieceType movePt = pt == KING ? king_type(c) : pt;
+   Bitboard b = moves_bb(c, movePt, s, byTypeBB[ALL_PIECES]);
+   // Add initial moves
+   if (double_step_region(c) & s)
+@@ -1436,13 +1498,13 @@ inline bool Position::is_chess960() const {
+ 
+ inline bool Position::capture_or_promotion(Move m) const {
+   assert(is_ok(m));
+-  return type_of(m) == PROMOTION || type_of(m) == EN_PASSANT || (type_of(m) != CASTLING && !empty(to_sq(m)));
++  return type_of(m) == PROMOTION || type_of(m) == EN_PASSANT || (type_of(m) != CASTLING && !empty(to_sq(m)) && !mansion_special(m));
+ }
+ 
+ inline bool Position::capture(Move m) const {
+   assert(is_ok(m));
+   // Castling is encoded as "king captures rook"
+-  return (!empty(to_sq(m)) && type_of(m) != CASTLING && from_sq(m) != to_sq(m)) || type_of(m) == EN_PASSANT;
++  return (!empty(to_sq(m)) && type_of(m) != CASTLING && from_sq(m) != to_sq(m) && !mansion_special(m)) || type_of(m) == EN_PASSANT;
+ }
+ 
+ inline Square Position::capture_square(Square to) const {
 diff --git a/src/ucioption.cpp b/src/ucioption.cpp
-index 0326e04..a9b4068 100644
+index 0326e04..52a46c5 100644
 --- a/src/ucioption.cpp
 +++ b/src/ucioption.cpp
-@@ -76,6 +76,17 @@ void on_variant_path(const Option& o) {
+@@ -76,6 +76,29 @@ void on_variant_path(const Option& o) {
  
      Options["UCI_Variant"].set_combo(variants.get_keys());
  }
@@ -200,23 +567,46 @@ index 0326e04..a9b4068 100644
 +    Variant* v = const_cast<Variant*>(it->second);
 +    v->pieceValue[MG][CUSTOM_PIECE_1] = v->pieceValue[EG][CUSTOM_PIECE_1] = int(Options["MansionValue"]);
 +    v->productionPointValue = int(Options["MansionPointValue"]);
++    v->mansionKingBonus = int(Options["MansionKingBonus"]);
++    v->mansionSquareValue = int(Options["MansionSquareValue"]);
++    v->mansionAliveBonus = int(Options["MansionAliveBonus"]);
++    v->mansionShelterBonus = int(Options["MansionShelterBonus"]);
++    v->mansionReady3 = int(Options["MansionReady3"]);
++    v->mansionReady9 = int(Options["MansionReady9"]);
++    // 기물 가치: 표준 체스 값의 %(100 = 그대로)
++    const char* pctNames[] = {"MansionPawnPct", "MansionKnightPct", "MansionBishopPct", "MansionRookPct", "MansionQueenPct"};
++    PieceType pts[] = {PAWN, KNIGHT, BISHOP, ROOK, QUEEN};
++    for (int i = 0; i < 5; ++i)
++        for (Phase ph : {MG, EG})
++            v->pieceValue[ph][pts[i]] = Value(int(PieceValue[ph][pts[i]]) * int(Options[pctNames[i]]) / 100);
 +    if (std::string(Options["UCI_Variant"]) == "chessmansion")
 +        PSQT::init(v);
 +}
  void on_variant_set(const Option &o) {
      // Re-initialize NNUE
      Eval::NNUE::init();
-@@ -192,6 +203,8 @@ void init(OptionsMap& o) {
+@@ -192,6 +215,19 @@ void init(OptionsMap& o) {
    o["nodestime"]             << Option(0, 0, 10000);
    o["UCI_Chess960"]          << Option(false);
    o["UCI_Variant"]           << Option("chess", variants.get_keys(), on_variant_change);
-+  o["MansionValue"]          << Option(2600, 0, 10000, on_mansion_value);
-+  o["MansionPointValue"]     << Option(60, 0, 2000, on_mansion_value);
++  o["MansionValue"]          << Option(1369, 0, 10000, on_mansion_value);
++  o["MansionPointValue"]     << Option(66, 0, 2000, on_mansion_value);
++  o["MansionKingBonus"]      << Option(211, -2000, 2000, on_mansion_value);
++  o["MansionSquareValue"]    << Option(37, -500, 500, on_mansion_value);
++  o["MansionAliveBonus"]     << Option(201, -3000, 3000, on_mansion_value);
++  o["MansionShelterBonus"]   << Option(-9, -1000, 1000, on_mansion_value);
++  o["MansionReady3"]         << Option(31, -1000, 1000, on_mansion_value);
++  o["MansionReady9"]         << Option(16, -1000, 1000, on_mansion_value);
++  o["MansionPawnPct"]        << Option(98, 30, 300, on_mansion_value);
++  o["MansionKnightPct"]      << Option(102, 30, 300, on_mansion_value);
++  o["MansionBishopPct"]      << Option(94, 30, 300, on_mansion_value);
++  o["MansionRookPct"]        << Option(93, 30, 300, on_mansion_value);
++  o["MansionQueenPct"]       << Option(59, 30, 300, on_mansion_value);
    o["UCI_AnalyseMode"]       << Option(false);
    o["UCI_LimitStrength"]     << Option(false);
    o["UCI_Elo"]               << Option(1350, 500, 2850);
 diff --git a/src/variant.cpp b/src/variant.cpp
-index 9ec8c49..0c4a278 100644
+index 9ec8c49..39ce794 100644
 --- a/src/variant.cpp
 +++ b/src/variant.cpp
 @@ -1026,6 +1026,39 @@ namespace {
@@ -226,22 +616,22 @@ index 9ec8c49..0c4a278 100644
 +    // ChessMansion (체스맨션) — chessmansion.com
 +    Variant* chessmansion_variant() {
 +        Variant* v = chess_variant_base()->init();
-+        v->maxRank = RANK_6;
-+        v->maxFile = FILE_F;
-+        v->add_piece(CUSTOM_PIECE_1, 'm', "AD");
-+        v->pieceValue[MG][CUSTOM_PIECE_1] = 2600;
-+        v->pieceValue[EG][CUSTOM_PIECE_1] = 2600;
-+        v->startFen = "mqkbnr/pppppp/6/6/PPPPPP/MQKBNR w KQkq - 0 1 0 0";
-+        v->promotionRegion[WHITE] = Rank6BB;
++        v->maxRank = RANK_7;
++        v->maxFile = FILE_G;
++        // 맨션: 움직이지 않음(이동 규칙 없음)
++        v->add_piece(CUSTOM_PIECE_1, 'm', "");
++        v->pieceValue[MG][CUSTOM_PIECE_1] = 1000;
++        v->pieceValue[EG][CUSTOM_PIECE_1] = 1000;
++        // 맨션에 들어가 있는 킹의 움직임 표(판에 놓이지 않는 보조 기물): 바로 옆 8칸 + 둘레 16칸
++        v->add_piece(CUSTOM_PIECE_2, 'x', "KADN");
++        v->pieceValue[MG][CUSTOM_PIECE_2] = v->pieceValue[EG][CUSTOM_PIECE_2] = 0;
++        v->mergedKingType = CUSTOM_PIECE_2;
++        v->startFen = "rrmkmrr/nnnnnnn/7/7/7/NNNNNNN/RRMKMRR w - - 0 1 0 5 0 0";
++        v->promotionRegion[WHITE] = Rank7BB;
 +        v->promotionRegion[BLACK] = Rank1BB;
 +        v->doubleStepRegion[WHITE] = Rank2BB;
-+        v->doubleStepRegion[BLACK] = Rank5BB;
-+        v->castlingKingFile = FILE_C;
-+        v->castlingKingsideFile = FILE_E;
-+        v->castlingQueensideFile = FILE_A;
-+        v->castlingRookKingsideFile = FILE_F;
-+        v->castlingRookQueensideFile = FILE_A;
-+        v->castlingRookPieces[WHITE] = v->castlingRookPieces[BLACK] = piece_set(ROOK) | CUSTOM_PIECE_1;
++        v->doubleStepRegion[BLACK] = Rank6BB;
++        v->castling = false;
 +        v->pieceDrops = true;
 +        v->freeDrops = true;
 +        v->firstRankPawnDrops = true;
@@ -253,7 +643,7 @@ index 9ec8c49..0c4a278 100644
 +        v->productionCost[ROOK] = 5;
 +        v->productionCost[QUEEN] = 9;
 +        v->productionPointValue = 60;
-+        v->nMoveRule = 20;
++        v->nMoveRule = 30;
 +        return v;
 +    }
      // Almost chess
@@ -268,17 +658,27 @@ index 9ec8c49..0c4a278 100644
      add("sortofalmost", sortofalmost_variant());
      add("chigorin", chigorin_variant());
 diff --git a/src/variant.h b/src/variant.h
-index 0e6d44c..6b5ace1 100644
+index 0e6d44c..6c44c6c 100644
 --- a/src/variant.h
 +++ b/src/variant.h
-@@ -118,6 +118,11 @@ struct Variant {
+@@ -118,6 +118,21 @@ struct Variant {
    Rank soldierPromotionRank = RANK_1;
    EnclosingRule flipEnclosedPieces = NO_ENCLOSING;
    bool freeDrops = false;
 +  // 체스맨션 생산: productionPiece 옆 칸에만, productionCost만큼 포인트를 써서 놓을 수 있음(0 = 생산 불가 종류)
 +  PieceType productionPiece = NO_PIECE_TYPE;
++  // 맨션에 들어가 있는 킹의 움직임(보조 기물 종류)
++  PieceType mergedKingType = NO_PIECE_TYPE;
 +  int productionCost[PIECE_TYPE_NB] = {};
 +  int productionPointValue = 0;
++  // 킹이 맨션에 들어가 있을 때의 평가 보너스(출격·맨션 옮기기 능력 값)
++  int mansionKingBonus = 0;
++  // 체스맨션 전용 평가 항목(전부 SPSA 튜닝 대상, 기본 0)
++  int mansionSquareValue = 0;   // 출격할 수 있는 빈칸 1칸당
++  int mansionAliveBonus = 0;    // 맨션이 하나라도 남아 있으면(마지막 맨션의 추가 가치)
++  int mansionShelterBonus = 0;  // 킹이 내 맨션 바로 옆에 있으면(한 수 만에 귀환 가능)
++  int mansionReady3 = 0;        // 영향력 3P 이상(나이트·비숍 출격 가능)
++  int mansionReady9 = 0;        // 영향력 9P 이상(퀸 출격 가능)
 +  int productionPointCap = 1000;
  
    // game end
