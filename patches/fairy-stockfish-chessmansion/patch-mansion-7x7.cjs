@@ -1,13 +1,13 @@
 // 체스맨션 Fairy-Stockfish 패치 3 — patch-mansion.cjs, patch-mansion-points.cjs 다음에 적용. chessmansion-oss 저장소에도 같이 올림.
 // 2026-10-04 7×7 개편(docs/game-mode-rules.md):
-//  - 7×7, 백 1랭크 a→g: 룩·룩·맨션·킹·맨션·룩·룩, 2랭크 나이트 7개(흑은 위아래 대칭), 시작 영향력 백 0P·흑 5P, 영향력은 상대 기물을 잡을 때만(그 기물 출격 비용만큼, 맨션 0). 캐슬링 없음. 무진전 무승부 30수
+//  - 7×7, 백 1랭크 a→g: 퀸·나이트·맨션·킹·맨션·비숍·룩, 2랭크 폰 7개(흑은 위아래 대칭), 시작 영향력 0P, 잡으면 비용-2·귀환하면 비용-1, 폰은 출격·귀환 불가. 캐슬링 없음. 무진전 무승부 50수
 //  - 맨션(m): 움직이지 않고 공격하지도 않음(잡힐 수는 있음, 길은 막음). 두 채가 영향력(포인트)을 같이 씀
 //  - 출격(생산): 맨션 바로 옆 8칸 빈칸에. 체크 중엔 체크를 막는 자리에만(일반 합법성 검사로 걸러짐)
 //  - 귀환: 킹 외 내 기물이 자기 움직임으로 내 맨션 칸(킹이 들어가 있으면 그 칸)에 닿으면 사라지고 출격 비용만큼 영향력.
 //    폰은 앞 1칸·첫 수 2칸만. 체크 중엔 불가. 폰 귀환은 무진전 카운터 리셋
 //  - 킹 귀환: 킹이 바로 옆 내 맨션 칸으로 들어감(맨션은 판에서 빠지고 킹이 그 칸에, 상태값 mansionMerged로 표시).
 //    들어가 있는 킹은 바로 옆 8칸 + 둘레 16칸으로 출격(잡기 가능, 원래 칸엔 맨션이 다시 남음)하거나 반대편 맨션으로 옮김.
-//    들어가 있는 동안 킹의 움직임(=공격 칸)은 보조 기물 'x'(Betza "KADN")로 계산. 체크 중에도 들어가기·옮기기 가능
+//    들어가 있는 동안 킹의 움직임(=공격 칸)은 보조 기물 'x'(Betza "K") — 바로 옆 1칸 이동·잡기. 2칸 거리는 반대편 맨션으로 옮길 때만(특수 이동)
 //  - 맨션 두 채를 모두 잃으면 영향력 0, 이후 안 쌓임(하나만 잃으면 유지)
 // 엔진 구현: 기물 귀환·킹 귀환·맨션 옮기기는 SPECIAL 수(출발칸 → 맨션 칸, UCI "e2c1"). 킹 출격은 일반 킹 이동.
 // FEN 끝에 "백영향력 흑영향력 백킹귀환 흑킹귀환"(0/1).
@@ -53,14 +53,14 @@ rep('variant.cpp', `        v->maxRank = RANK_6;
         v->add_piece(CUSTOM_PIECE_2, 'x', "KADN");
         v->pieceValue[MG][CUSTOM_PIECE_2] = v->pieceValue[EG][CUSTOM_PIECE_2] = 0;
         v->mergedKingType = CUSTOM_PIECE_2;
-        v->startFen = "rrmkmrr/nnnnnnn/7/7/7/NNNNNNN/RRMKMRR w - - 0 1 0 5 0 0";
+        v->startFen = "qnmkmbr/ppppppp/7/7/7/PPPPPPP/QNMKMBR w - - 0 1 0 1 0 0";
         v->promotionRegion[WHITE] = Rank7BB;
         v->promotionRegion[BLACK] = Rank1BB;
         v->doubleStepRegion[WHITE] = Rank2BB;
         v->doubleStepRegion[BLACK] = Rank6BB;
         v->castling = false;
 `);
-rep('variant.cpp', '        v->nMoveRule = 20;\n        return v;', '        v->nMoveRule = 30;\n        return v;');
+rep('variant.cpp', '        v->nMoveRule = 20;\n        return v;', '        v->nMoveRule = 50;\n        v->productionPointCap = 9;\n        return v;');
 
 // ---- variant.h ----
 rep('variant.h', '  PieceType productionPiece = NO_PIECE_TYPE;\n',
@@ -375,11 +375,11 @@ rep('movegen.cpp', `  template<Color Us, GenType Type>
                 Square from = pop_lsb(b);
                 PieceType pt = type_of(pos.piece_on(from));
                 bool reach;
+                // 폰은 귀환 못 함. 그 밖의 기물은 맨션 바로 옆 8칸 안에 있거나, 자기 움직임으로 맨션 칸에 닿으면 귀환(2026-10-05)
                 if (pt == PAWN)
-                    reach =   from + Up == t
-                           || ((pos.double_step_region(Us) & from) && is_ok(from + Up) && pos.empty(from + Up) && from + Up + Up == t);
+                    reach = false;
                 else
-                    reach = pos.attacks_from(Us, pt, from) & t;
+                    reach = false; // 2026-10-05 기물 귀환 없앰
                 if (reach)
                     *moveList++ = make<SPECIAL>(from, t);
             }
@@ -433,16 +433,16 @@ rep("evaluate.cpp", "      v += (int(pos.mansion_merged(us)) - int(pos.mansion_m
 
 // ---- SPSA 튜닝값을 엔진 기본값으로(2026-10-04) — 영향력 1P 가치 60 → 118 ----
 rep('ucioption.cpp', '  o["MansionPointValue"]     << Option(60, 0, 2000, on_mansion_value);\n', '  o["MansionPointValue"]     << Option(118, 0, 2000, on_mansion_value);\n');
-// ---- 2026-10-04 영향력 개편: 매 수 +1 없음, 상대 기물을 잡으면 그 기물 출격 비용만큼(맨션 0), 귀환은 출격 비용만큼 ----
-rep('position.cpp', '      else if (has_mansion(us))\n          st->productionPoints[us] = std::min(st->productionPoints[us] + 1, var->productionPointCap);\n',
-    '      else if (captured && color_of(captured) == them && has_mansion(us))\n          st->productionPoints[us] = std::min(st->productionPoints[us] + production_cost(type_of(captured)), var->productionPointCap);\n');
-rep('position.cpp', '          st->productionPoints[us] += 1;\n', '');
+// ---- 2026-10-05 영향력 단순화: 이동(킹 귀환·옮기기 포함)할 때마다 +1P(맨션이 있을 때), 출격은 -비용. 잡기·귀환으로 얻는 P 없음. 기물 귀환 없음. 흑 1P로 시작 ----
+// 2026-10-05 수입: 이동(킹 귀환·옮기기 포함)할 때마다 +1P, 최대 9P. 출격한 차례는 +1 없음
+rep('position.cpp', '          st->productionPoints[us] += 1;\n', '          st->productionPoints[us] = std::min(st->productionPoints[us] + 1, var->productionPointCap);\n');
+// ---- 2026-10-05 폰 출격 불가 + 판 위 최대치(퀸 1, 룩·비숍·나이트 2) — 이미 최대치면 그 기물은 출격 못 함 ----
+rep('position.h', '      if (!cost || cost > st->productionPoints[c]', '      if (!cost || pt == PAWN || pieceCount[make_piece(c, pt)] >= (pt == QUEEN ? 1 : 2) || cost > st->productionPoints[c]');
 
-rep('position.cpp', '          st->productionPoints[us] += production_cost(type_of(pc)) + 1;\n', '          st->productionPoints[us] += production_cost(type_of(pc));\n');
 
-// ---- 룩4+나이트7 배치 SPSA 튜닝값(2026-10-04, 30분·726판)을 엔진 기본값으로 ----
+// ---- SPSA 튜닝값(2026-10-05 최종 규칙, Q N M K M B R / 폰 7, 이동마다 +1P·최대 9P, 492판)을 엔진 기본값으로 ----
 {
-    const tuned = { MansionValue: 1369, MansionPointValue: 66, MansionKingBonus: 211, MansionSquareValue: 37, MansionAliveBonus: 201, MansionShelterBonus: -9, MansionReady3: 31, MansionReady9: 16, MansionPawnPct: 98, MansionKnightPct: 102, MansionBishopPct: 94, MansionRookPct: 93, MansionQueenPct: 59 };
+    const tuned = {MansionValue: 1110, MansionPointValue: 152, MansionKingBonus: 140, MansionSquareValue: 37, MansionAliveBonus: 67, MansionShelterBonus: 26, MansionReady3: 37, MansionReady9: -39, MansionPawnPct: 99, MansionKnightPct: 96, MansionBishopPct: 86, MansionRookPct: 81, MansionQueenPct: 65};
     const p = path.join(src, 'ucioption.cpp');
     let s = fs.readFileSync(p, 'utf8');
     for (const [name, value] of Object.entries(tuned)) {
@@ -452,5 +452,6 @@ rep('position.cpp', '          st->productionPoints[us] += production_cost(type_
     }
     fs.writeFileSync(p, s);
 }
+
 
 console.log('chessmansion 7x7 patch applied');

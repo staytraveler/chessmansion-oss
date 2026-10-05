@@ -49,9 +49,9 @@ Stockfish is distributed unmodified. Fairy-Stockfish is a modified single-thread
 - `worker-single.js` — 빌드 결과를 `new Worker('stockfish.js')`로 바로 띄울 수 있게 하는 진입 코드.
 - `build-single.sh` — 실제 빌드 명령(Emscripten 2.0.26, `-DSINGLE_THREADED`, largeboards·allvars·NNUE 내장·wasm SIMD 끔).
 
-`patches/fairy-stockfish-chessmansion/` (2026-10-02, 마지막 수정 2026-10-04):
+`patches/fairy-stockfish-chessmansion/` (2026-10-02, 마지막 수정 2026-10-05):
 
-- `chessmansion.patch` — 현재 배포 빌드에 들어간 체스맨션 변형 수정 전체(스레드 관련 파일 제외, `git diff` 결과). `src/variant.cpp/.h`(7×7 `chessmansion` 변형 — 백 1랭크 룩·룩·맨션·킹·맨션·룩·룩, 2랭크 나이트 7개, 맨션 기물 `m`은 움직이지 않음, 캐슬링 없음, 무진전 무승부 30수), `src/position.cpp/.h`(영향력 상태·해시·FEN 끝 "백영향력 흑영향력 백킹귀환 흑킹귀환", 맨션 옆 칸 출격, 상대 기물을 잡으면 그 기물 값만큼 영향력, 기물 귀환·킹 귀환·맨션 옮기기 특수 수), `src/movegen.cpp`(귀환·킹 귀환 수 생성), `src/evaluate.cpp`(맨션·영향력 평가), `src/ucioption.cpp`(`Mansion*` 평가 옵션, 기본값은 자체 대국 튜닝값).
+- `chessmansion.patch` — 현재 배포 빌드에 들어간 체스맨션 변형 수정 전체(스레드 관련 파일 제외, `git diff` 결과). `src/variant.cpp/.h`(7×7 `chessmansion` 변형 — 백 1랭크 퀸·나이트·맨션·킹·맨션·비숍·룩, 2랭크 폰 7개, 맨션 기물 `m`은 움직이지 않음, 맨션 안 킹은 2칸 범위, 캐슬링 없음, 무진전 무승부 50수), `src/position.cpp/.h`(영향력 상태·해시·FEN 끝 "백영향력 흑영향력 백킹귀환 흑킹귀환", 수마다 +1P·최대 9P, 맨션 옆 칸 출격·판 위 최대 개수, 킹 귀환·맨션 옮기기 특수 수), `src/movegen.cpp`(귀환·킹 귀환 수 생성), `src/evaluate.cpp`(맨션·영향력 평가), `src/ucioption.cpp`(`Mansion*` 평가 옵션, 기본값은 자체 대국 튜닝값).
 - `patch-mansion.cjs`, `patch-mansion-points.cjs`, `patch-mansion-7x7.cjs` — 위 수정을 원본 소스에 적용하는 스크립트(이 순서로 실행). 결과는 `chessmansion.patch`와 같음.
 
 빌드 재현: 위 커밋을 받아 `git apply single-thread.patch` → `preamble-single.js`, `worker-single.js`를 `src/emscripten/`에 복사 → `git apply chessmansion.patch`(또는 `node patch-mansion.cjs && node patch-mansion-points.cjs && node patch-mansion-7x7.cjs`) → `build-single.sh` 실행.
