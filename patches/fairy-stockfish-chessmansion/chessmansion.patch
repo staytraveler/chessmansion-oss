@@ -425,7 +425,7 @@ index 2b5ae3a..b9c3bb6 100644
           || (type_of(m) == PROMOTION && sittuyin_promotion())
           || (is_pass(m) && (pass(us) || var->wallOrMove)));
 diff --git a/src/position.h b/src/position.h
-index 685c079..b86dac8 100644
+index 685c079..2650932 100644
 --- a/src/position.h
 +++ b/src/position.h
 @@ -56,6 +56,8 @@ struct StateInfo {
@@ -510,7 +510,7 @@ index 685c079..b86dac8 100644
 +  if (var->productionPiece != NO_PIECE_TYPE)
 +  {
 +      int cost = var->productionCost[pt];
-+      if (!cost || pt == PAWN || pieceCount[make_piece(c, pt)] >= (pt == QUEEN ? 1 : 2) || cost > st->productionPoints[c])
++      if (!cost || pieceCount[make_piece(c, pt)] >= (pt == PAWN ? 5 : pt == QUEEN ? 1 : 2) || cost > st->productionPoints[c])
 +          return Bitboard(0);
 +      b &= production_squares(c);
 +  }
@@ -553,7 +553,7 @@ index 685c079..b86dac8 100644
  
  inline Square Position::capture_square(Square to) const {
 diff --git a/src/ucioption.cpp b/src/ucioption.cpp
-index 0326e04..cbc35ab 100644
+index 0326e04..ff2a4e7 100644
 --- a/src/ucioption.cpp
 +++ b/src/ucioption.cpp
 @@ -76,6 +76,29 @@ void on_variant_path(const Option& o) {
@@ -590,35 +590,35 @@ index 0326e04..cbc35ab 100644
    o["nodestime"]             << Option(0, 0, 10000);
    o["UCI_Chess960"]          << Option(false);
    o["UCI_Variant"]           << Option("chess", variants.get_keys(), on_variant_change);
-+  o["MansionValue"]          << Option(1110, 0, 10000, on_mansion_value);
-+  o["MansionPointValue"]     << Option(152, 0, 2000, on_mansion_value);
-+  o["MansionKingBonus"]      << Option(140, -2000, 2000, on_mansion_value);
-+  o["MansionSquareValue"]    << Option(37, -500, 500, on_mansion_value);
-+  o["MansionAliveBonus"]     << Option(67, -3000, 3000, on_mansion_value);
-+  o["MansionShelterBonus"]   << Option(26, -1000, 1000, on_mansion_value);
-+  o["MansionReady3"]         << Option(37, -1000, 1000, on_mansion_value);
-+  o["MansionReady9"]         << Option(-39, -1000, 1000, on_mansion_value);
-+  o["MansionPawnPct"]        << Option(99, 30, 300, on_mansion_value);
-+  o["MansionKnightPct"]      << Option(96, 30, 300, on_mansion_value);
-+  o["MansionBishopPct"]      << Option(86, 30, 300, on_mansion_value);
-+  o["MansionRookPct"]        << Option(81, 30, 300, on_mansion_value);
-+  o["MansionQueenPct"]       << Option(65, 30, 300, on_mansion_value);
++  o["MansionValue"]          << Option(804, 0, 10000, on_mansion_value);
++  o["MansionPointValue"]     << Option(107, 0, 2000, on_mansion_value);
++  o["MansionKingBonus"]      << Option(22, -2000, 2000, on_mansion_value);
++  o["MansionSquareValue"]    << Option(51, -500, 500, on_mansion_value);
++  o["MansionAliveBonus"]     << Option(110, -3000, 3000, on_mansion_value);
++  o["MansionShelterBonus"]   << Option(38, -1000, 1000, on_mansion_value);
++  o["MansionReady3"]         << Option(50, -1000, 1000, on_mansion_value);
++  o["MansionReady9"]         << Option(-48, -1000, 1000, on_mansion_value);
++  o["MansionPawnPct"]        << Option(112, 30, 300, on_mansion_value);
++  o["MansionKnightPct"]      << Option(106, 30, 300, on_mansion_value);
++  o["MansionBishopPct"]      << Option(95, 30, 300, on_mansion_value);
++  o["MansionRookPct"]        << Option(85, 30, 300, on_mansion_value);
++  o["MansionQueenPct"]       << Option(69, 30, 300, on_mansion_value);
    o["UCI_AnalyseMode"]       << Option(false);
    o["UCI_LimitStrength"]     << Option(false);
    o["UCI_Elo"]               << Option(1350, 500, 2850);
 diff --git a/src/variant.cpp b/src/variant.cpp
-index 9ec8c49..bb8c8e4 100644
+index 9ec8c49..cc7ac19 100644
 --- a/src/variant.cpp
 +++ b/src/variant.cpp
-@@ -1026,6 +1026,40 @@ namespace {
+@@ -1026,6 +1026,41 @@ namespace {
          v->castling = false;
          return v;
      }
 +    // ChessMansion (체스맨션) — chessmansion.com
 +    Variant* chessmansion_variant() {
 +        Variant* v = chess_variant_base()->init();
-+        v->maxRank = RANK_7;
-+        v->maxFile = FILE_G;
++        v->maxRank = RANK_5;
++        v->maxFile = FILE_E;
 +        // 맨션: 움직이지 않음(이동 규칙 없음)
 +        v->add_piece(CUSTOM_PIECE_1, 'm', "");
 +        v->pieceValue[MG][CUSTOM_PIECE_1] = 1000;
@@ -627,11 +627,12 @@ index 9ec8c49..bb8c8e4 100644
 +        v->add_piece(CUSTOM_PIECE_2, 'x', "KADN");
 +        v->pieceValue[MG][CUSTOM_PIECE_2] = v->pieceValue[EG][CUSTOM_PIECE_2] = 0;
 +        v->mergedKingType = CUSTOM_PIECE_2;
-+        v->startFen = "qnmkmbr/ppppppp/7/7/7/PPPPPPP/QNMKMBR w - - 0 1 0 1 0 0";
-+        v->promotionRegion[WHITE] = Rank7BB;
++        v->startFen = "m1k1m/ppppp/5/PPPPP/M1K1M w - - 0 1 0 1 0 0";
++        v->promotionRegion[WHITE] = Rank5BB;
 +        v->promotionRegion[BLACK] = Rank1BB;
-+        v->doubleStepRegion[WHITE] = Rank2BB;
-+        v->doubleStepRegion[BLACK] = Rank6BB;
++        v->doubleStep = false;
++        v->doubleStepRegion[WHITE] = 0;
++        v->doubleStepRegion[BLACK] = 0;
 +        v->castling = false;
 +        v->pieceDrops = true;
 +        v->freeDrops = true;
@@ -651,7 +652,7 @@ index 9ec8c49..bb8c8e4 100644
      // Almost chess
      // Queens are replaced by chancellors
      // https://en.wikipedia.org/wiki/Almost_chess
-@@ -1921,6 +1955,7 @@ void VariantMap::init() {
+@@ -1921,6 +1956,7 @@ void VariantMap::init() {
      add("euroshogi", euroshogi_variant());
      add("losalamos", losalamos_variant());
      add("gardner", gardner_variant());

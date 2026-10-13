@@ -43,8 +43,8 @@ rep('variant.cpp', `        v->maxRank = RANK_6;
         v->castlingRookKingsideFile = FILE_F;
         v->castlingRookQueensideFile = FILE_A;
         v->castlingRookPieces[WHITE] = v->castlingRookPieces[BLACK] = piece_set(ROOK) | CUSTOM_PIECE_1;
-`, `        v->maxRank = RANK_7;
-        v->maxFile = FILE_G;
+`, `        v->maxRank = RANK_5;
+        v->maxFile = FILE_E;
         // 맨션: 움직이지 않음(이동 규칙 없음)
         v->add_piece(CUSTOM_PIECE_1, 'm', "");
         v->pieceValue[MG][CUSTOM_PIECE_1] = 1000;
@@ -53,11 +53,12 @@ rep('variant.cpp', `        v->maxRank = RANK_6;
         v->add_piece(CUSTOM_PIECE_2, 'x', "KADN");
         v->pieceValue[MG][CUSTOM_PIECE_2] = v->pieceValue[EG][CUSTOM_PIECE_2] = 0;
         v->mergedKingType = CUSTOM_PIECE_2;
-        v->startFen = "qnmkmbr/ppppppp/7/7/7/PPPPPPP/QNMKMBR w - - 0 1 0 1 0 0";
-        v->promotionRegion[WHITE] = Rank7BB;
+        v->startFen = "m1k1m/ppppp/5/PPPPP/M1K1M w - - 0 1 0 1 0 0";
+        v->promotionRegion[WHITE] = Rank5BB;
         v->promotionRegion[BLACK] = Rank1BB;
-        v->doubleStepRegion[WHITE] = Rank2BB;
-        v->doubleStepRegion[BLACK] = Rank6BB;
+        v->doubleStep = false;
+        v->doubleStepRegion[WHITE] = 0;
+        v->doubleStepRegion[BLACK] = 0;
         v->castling = false;
 `);
 rep('variant.cpp', '        v->nMoveRule = 20;\n        return v;', '        v->nMoveRule = 50;\n        v->productionPointCap = 9;\n        return v;');
@@ -437,12 +438,12 @@ rep('ucioption.cpp', '  o["MansionPointValue"]     << Option(60, 0, 2000, on_man
 // 2026-10-05 수입: 이동(킹 귀환·옮기기 포함)할 때마다 +1P, 최대 9P. 출격한 차례는 +1 없음
 rep('position.cpp', '          st->productionPoints[us] += 1;\n', '          st->productionPoints[us] = std::min(st->productionPoints[us] + 1, var->productionPointCap);\n');
 // ---- 2026-10-05 폰 출격 불가 + 판 위 최대치(퀸 1, 룩·비숍·나이트 2) — 이미 최대치면 그 기물은 출격 못 함 ----
-rep('position.h', '      if (!cost || cost > st->productionPoints[c]', '      if (!cost || pt == PAWN || pieceCount[make_piece(c, pt)] >= (pt == QUEEN ? 1 : 2) || cost > st->productionPoints[c]');
+rep('position.h', '      if (!cost || cost > st->productionPoints[c]', '      if (!cost || pieceCount[make_piece(c, pt)] >= (pt == PAWN ? 5 : pt == QUEEN ? 1 : 2) || cost > st->productionPoints[c]');
 
 
-// ---- SPSA 튜닝값(2026-10-05 최종 규칙, Q N M K M B R / 폰 7, 이동마다 +1P·최대 9P, 492판)을 엔진 기본값으로 ----
+// ---- SPSA 튜닝값(2026-10-06 5×5 체스맨션, 884판)을 엔진 기본값으로 ----
 {
-    const tuned = {MansionValue: 1110, MansionPointValue: 152, MansionKingBonus: 140, MansionSquareValue: 37, MansionAliveBonus: 67, MansionShelterBonus: 26, MansionReady3: 37, MansionReady9: -39, MansionPawnPct: 99, MansionKnightPct: 96, MansionBishopPct: 86, MansionRookPct: 81, MansionQueenPct: 65};
+    const tuned = {MansionValue: 804, MansionPointValue: 107, MansionKingBonus: 22, MansionSquareValue: 51, MansionAliveBonus: 110, MansionShelterBonus: 38, MansionReady3: 50, MansionReady9: -48, MansionPawnPct: 112, MansionKnightPct: 106, MansionBishopPct: 95, MansionRookPct: 85, MansionQueenPct: 69};
     const p = path.join(src, 'ucioption.cpp');
     let s = fs.readFileSync(p, 'utf8');
     for (const [name, value] of Object.entries(tuned)) {
